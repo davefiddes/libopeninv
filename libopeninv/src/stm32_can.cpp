@@ -35,13 +35,34 @@
 
 #define MAX_INTERFACES        2
 #define IDS_PER_BANK          4
-#define SDO_WRITE             0x40
-#define SDO_READ              0x22
+
+/*
+ * For details of the SDO protocol see:
+ *
+ * CiA 301 - CANopen application layer and communication profile
+ * Section 7.2.4
+ *
+ * OR
+ *
+ * http://www.byteme.org.uk/canopenparent/canopen/sdo-service-data-objects-canopen/
+ *
+ * In the context of CANopen SDO download is from a client to the server/
+ * inverter and upload is from the server/inverter to the client.
+ */
+#define SDO_REQUEST_DOWNLOAD  (1 << 5)
+#define SDO_REQUEST_UPLOAD    (2 << 5)
+#define SDO_RESPONSE_UPLOAD   (2 << 5)
+#define SDO_RESPONSE_DOWNLOAD (3 << 5)
+#define SDO_EXPEDITED         (1 << 1)
+#define SDO_SIZE_SPECIFIED    (1)
+#define SDO_WRITE             (SDO_REQUEST_DOWNLOAD | SDO_EXPEDITED | SDO_SIZE_SPECIFIED)
+#define SDO_READ              SDO_REQUEST_UPLOAD
 #define SDO_ABORT             0x80
-#define SDO_WRITE_REPLY       0x23
-#define SDO_READ_REPLY        0x43
+#define SDO_WRITE_REPLY       SDO_RESPONSE_DOWNLOAD
+#define SDO_READ_REPLY        (SDO_RESPONSE_UPLOAD | SDO_EXPEDITED | SDO_SIZE_SPECIFIED)
 #define SDO_ERR_INVIDX        0x06020000
 #define SDO_ERR_RANGE         0x06090030
+#define SDO_ERR_GENERAL       0x08000000
 #define SENDMAP_ADDRESS(b)    b
 #define RECVMAP_ADDRESS(b)    (b + sizeof(canSendMap))
 #define CRC_ADDRESS(b)        (b+ + sizeof(canSendMap) + sizeof(canRecvMap))
@@ -150,6 +171,14 @@ bool Can::RegisterUserMessage(int canId)
       return true;
    }
    return false;
+}
+
+/** \brief Remove all CAN Id from user message list
+ */
+void Can::ClearUserMessages()
+{
+   nextUserMessageIndex = 0;
+   ConfigureFilters();
 }
 
 /** \brief Find first occurence of parameter in CAN map and output its mapping info
@@ -346,11 +375,6 @@ Can::Can(uint32_t baseAddr, enum baudrates baudrate, bool remap)
             // Configure CAN pin: TX.-
             gpio_set_mode(GPIO_BANK_CAN2_TX, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO_CAN2_TX);
          }
-                  // Configure CAN pin: RX (input pull-up).
-         gpio_set_mode(GPIO_BANK_CAN2_RX, GPIO_MODE_INPUT, GPIO_CNF_INPUT_PULL_UPDOWN, GPIO_CAN2_RX);
-         gpio_set(GPIO_BANK_CAN2_RX, GPIO_CAN2_RX);
-         // Configure CAN pin: TX.-
-         gpio_set_mode(GPIO_BANK_CAN2_TX, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, GPIO_CAN2_TX);
 
          //CAN2 RX and TX IRQs
          nvic_enable_irq(NVIC_CAN2_RX0_IRQ); //CAN RX
@@ -549,35 +573,50 @@ void Can::SDOWrite(uint8_t remoteNodeId, uint16_t index, uint8_t subIndex, uint3
 void Can::ProcessSDO(uint32_t data[2])
 {
    CAN_SDO *sdo = (CAN_SDO*)data;
-   if (sdo->index >= 0x2000 && sdo->index <= 0x2001 && sdo->subIndex < Param::PARAM_LAST)
+
+   if (sdo->index == 0x2000 || (sdo->index & 0xFF00) == 0x2100)
    {
       Param::PARAM_NUM paramIdx = (Param::PARAM_NUM)sdo->subIndex;
 
-      //SDO index 0x2001 will lookup the parameter by its unique ID
-      if (sdo->index == 0x2001)
-         paramIdx = Param::NumFromId(sdo->subIndex);
+      //SDO index 0x21xx will look up the parameter by its unique ID
+      //using subIndex as low byte and xx as high byte of ID
+      if ((sdo->index & 0xFF00) == 0x2100)
+         paramIdx = Param::NumFromId(sdo->subIndex + ((sdo->index & 0xFF) << 8));
 
-      if (sdo->cmd == SDO_WRITE)
+      if (paramIdx < Param::PARAM_LAST)
       {
-         if (Param::Set(paramIdx, sdo->data) == 0)
+         if (sdo->cmd == SDO_WRITE)
          {
-            sdo->cmd = SDO_WRITE_REPLY;
+            if (Param::Set(paramIdx, sdo->data) == 0)
+            {
+               sdo->cmd = SDO_WRITE_REPLY;
+            }
+            else
+            {
+               sdo->cmd = SDO_ABORT;
+               sdo->data = SDO_ERR_RANGE;
+            }
          }
-         else
+         else if (sdo->cmd == SDO_READ)
          {
-            sdo->cmd = SDO_ABORT;
-            sdo->data = SDO_ERR_RANGE;
+            sdo->data = Param::Get(paramIdx);
+            sdo->cmd = SDO_READ_REPLY;
          }
       }
-      else if (sdo->cmd == SDO_READ)
+      else
       {
-         sdo->data = Param::Get(paramIdx);
-         sdo->cmd = SDO_READ_REPLY;
+         sdo->cmd = SDO_ABORT;
+         sdo->data = SDO_ERR_INVIDX;
       }
    }
    else if (sdo->index >= 0x3000 && sdo->index < 0x4800 && sdo->subIndex < Param::PARAM_LAST)
    {
-      if (sdo->cmd == SDO_WRITE)
+      if (isSaving)
+      {
+         sdo->cmd = SDO_ABORT;
+         sdo->data = SDO_ERR_GENERAL;
+      }
+      else if (sdo->cmd == SDO_WRITE)
       {
          int result;
          int offset = sdo->data & 0xFF;
