@@ -28,9 +28,17 @@
 #include "canmap.h"
 #include "terminalcommands.h"
 
+//Some functions use the "register" keyword which C++ doesn't like
+//We can safely ignore that as we don't even use those functions
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wregister"
+#include <libopencm3/cm3/cortex.h>
+#pragma GCC diagnostic pop
+
 static Terminal* curTerm = NULL;
 
 CanMap* TerminalCommands::canMap;
+bool TerminalCommands::saveEnabled = true;
 
 void TerminalCommands::ParamSet(Terminal* term, char* arg)
 {
@@ -246,8 +254,8 @@ void TerminalCommands::PrintParamsJson(IPutChar* term, char *arg)
    for (uint32_t idx = 0; idx < Param::PARAM_LAST; idx++)
    {
       uint32_t canId;
-      uint8_t canStart, canLength;
-      int8_t offset;
+      uint8_t canStart;
+      int8_t canLength, offset;
       bool isRx;
       float canGain;
       pAtr = Param::GetAttrib((Param::PARAM_NUM)idx);
@@ -403,16 +411,31 @@ void TerminalCommands::MapCan(Terminal* term, char *arg)
 void TerminalCommands::SaveParameters(Terminal* term, char *arg)
 {
    arg = arg;
-   canMap->Save();
-   fprintf(term, "CANMAP stored\r\n");
-   uint32_t crc = parm_save();
-   fprintf(term, "Parameters stored, CRC=%x\r\n", crc);
+
+   if (saveEnabled)
+   {
+      cm_disable_interrupts();
+      canMap->Save();
+      fprintf(term, "CANMAP stored\r\n");
+      uint32_t crc = parm_save();
+      cm_enable_interrupts();
+      fprintf(term, "Parameters stored, CRC=%x\r\n", crc);
+   }
+   else
+   {
+      fprintf(term, "Will not write to flash in run modes, please stop before saving!\r\n");
+   }
 }
 
 void TerminalCommands::LoadParameters(Terminal* term, char *arg)
 {
    arg = arg;
-   if (0 == parm_load())
+
+   cm_disable_interrupts();
+   int res = parm_load();
+   cm_enable_interrupts();
+
+   if (0 == res)
    {
       Param::Change(Param::PARAM_LAST);
       fprintf(term, "Parameters loaded\r\n");
@@ -430,7 +453,7 @@ void TerminalCommands::Reset(Terminal* term, char *arg)
    scb_reset_system();
 }
 
-void TerminalCommands::PrintCanMap(Param::PARAM_NUM param, uint32_t canid, uint8_t offsetBits, uint8_t length, float gain, int8_t offset, bool rx)
+void TerminalCommands::PrintCanMap(Param::PARAM_NUM param, uint32_t canid, uint8_t offsetBits, int8_t length, float gain, int8_t offset, bool rx)
 {
    const char* name = Param::GetAttrib(param)->name;
    fprintf(curTerm, "can ");

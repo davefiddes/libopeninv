@@ -33,14 +33,15 @@
 
 const Terminal::HwInfo Terminal::hwInfo[] =
 {
-   { USART1, DMA_CHANNEL4, DMA_CHANNEL5, GPIOA, GPIO_USART1_TX, GPIOB, GPIO_USART1_RE_TX },
-   { USART2, DMA_CHANNEL7, DMA_CHANNEL6, GPIOA, GPIO_USART2_TX, GPIOD, GPIO_USART2_RE_TX },
-   { USART3, DMA_CHANNEL2, DMA_CHANNEL3, GPIOB, GPIO_USART3_TX, GPIOC, GPIO_USART3_PR_TX },
+   { USART1, DMA1, DMA_CHANNEL4, DMA_CHANNEL5, GPIOA, GPIO_USART1_TX, GPIOB, GPIO_USART1_RE_TX },
+   { USART2, DMA1, DMA_CHANNEL7, DMA_CHANNEL6, GPIOA, GPIO_USART2_TX, GPIOD, GPIO_USART2_RE_TX },
+   { USART3, DMA1, DMA_CHANNEL2, DMA_CHANNEL3, GPIOB, GPIO_USART3_TX, GPIOC, GPIO_USART3_PR_TX },
+   { UART4,  DMA2, DMA_CHANNEL5, DMA_CHANNEL3, GPIOC, GPIO_UART4_TX,  GPIOC, GPIO_UART4_TX },
 };
 
 Terminal* Terminal::defaultTerminal;
 
-Terminal::Terminal(uint32_t usart, const TERM_CMD* commands, bool remap)
+Terminal::Terminal(uint32_t usart, const TERM_CMD* commands, bool remap, bool echo)
 :  usart(usart),
    remap(remap),
    termCmds(commands),
@@ -51,7 +52,8 @@ Terminal::Terminal(uint32_t usart, const TERM_CMD* commands, bool remap)
    lastIdx(0),
    curBuf(0),
    curIdx(0),
-   firstSend(true)
+   firstSend(true),
+   echo(echo)
 {
    //Search info entry
    hw = hwInfo;
@@ -75,19 +77,19 @@ Terminal::Terminal(uint32_t usart, const TERM_CMD* commands, bool remap)
    usart_enable_rx_dma(usart);
    usart_enable_tx_dma(usart);
 
-   dma_channel_reset(DMA1, hw->dmatx);
-   dma_set_read_from_memory(DMA1, hw->dmatx);
-   dma_set_peripheral_address(DMA1, hw->dmatx, (uint32_t)&USART_DR(usart));
-   dma_set_peripheral_size(DMA1, hw->dmatx, DMA_CCR_PSIZE_8BIT);
-   dma_set_memory_size(DMA1, hw->dmatx, DMA_CCR_MSIZE_8BIT);
-   dma_enable_memory_increment_mode(DMA1, hw->dmatx);
+   dma_channel_reset(hw->dmactl, hw->dmatx);
+   dma_set_read_from_memory(hw->dmactl, hw->dmatx);
+   dma_set_peripheral_address(hw->dmactl, hw->dmatx, (uint32_t)&USART_DR(usart));
+   dma_set_peripheral_size(hw->dmactl, hw->dmatx, DMA_CCR_PSIZE_8BIT);
+   dma_set_memory_size(hw->dmactl, hw->dmatx, DMA_CCR_MSIZE_8BIT);
+   dma_enable_memory_increment_mode(hw->dmactl, hw->dmatx);
 
-   dma_channel_reset(DMA1, hw->dmarx);
-   dma_set_peripheral_address(DMA1, hw->dmarx, (uint32_t)&USART_DR(usart));
-   dma_set_peripheral_size(DMA1, hw->dmarx, DMA_CCR_PSIZE_8BIT);
-   dma_set_memory_size(DMA1, hw->dmarx, DMA_CCR_MSIZE_8BIT);
-   dma_enable_memory_increment_mode(DMA1, hw->dmarx);
-   dma_enable_channel(DMA1, hw->dmarx);
+   dma_channel_reset(hw->dmactl, hw->dmarx);
+   dma_set_peripheral_address(hw->dmactl, hw->dmarx, (uint32_t)&USART_DR(usart));
+   dma_set_peripheral_size(hw->dmactl, hw->dmarx, DMA_CCR_PSIZE_8BIT);
+   dma_set_memory_size(hw->dmactl, hw->dmarx, DMA_CCR_MSIZE_8BIT);
+   dma_enable_memory_increment_mode(hw->dmactl, hw->dmarx);
+   dma_enable_channel(hw->dmactl, hw->dmarx);
 
    ResetDMA();
 
@@ -97,19 +99,24 @@ Terminal::Terminal(uint32_t usart, const TERM_CMD* commands, bool remap)
 /** Run the terminal */
 void Terminal::Run()
 {
-   int numRcvd = dma_get_number_of_data(DMA1, hw->dmarx);
-   int currentIdx = bufSize - numRcvd;
+   int unusedBytes = dma_get_number_of_data(hw->dmactl, hw->dmarx);
+   int currentIdx = bufSize - unusedBytes;
 
-   if (0 == numRcvd)
+   if (usart_get_flag(usart, USART_SR_ORE))
+      usart_recv(usart); //Clear possible overrun
+
+   if (0 == unusedBytes)
       ResetDMA();
 
-   while (lastIdx < currentIdx) //echo
+   while (echo && lastIdx < currentIdx) //echo
       usart_send_blocking(usart, inBuf[lastIdx++]);
 
    if (currentIdx > 0)
    {
       if (inBuf[currentIdx - 1] == '\n' || inBuf[currentIdx - 1] == '\r')
       {
+         //Do not accept a new command while processing the current one
+         dma_disable_channel(hw->dmactl, hw->dmarx);
          if (currentIdx > 1) //handle just \n quicker
          {
             inBuf[currentIdx] = 0;
@@ -140,6 +147,11 @@ void Terminal::Run()
             else if (my_strcmp(inBuf, "fastuart") == 0)
             {
                FastUart(args);
+               currentIdx = 0;
+            }
+            else if (my_strcmp(inBuf, "echo") == 0)
+            {
+               Echo(args);
                currentIdx = 0;
             }
             else
@@ -211,7 +223,7 @@ void Terminal::PutChar(char c)
    }
 }
 
-void Terminal::SendBinary(uint8_t* data, uint32_t len)
+void Terminal::SendBinary(const uint8_t* data, uint32_t len)
 {
    uint32_t limitedLen = len < bufSize ? len : bufSize;
 
@@ -220,7 +232,7 @@ void Terminal::SendBinary(uint8_t* data, uint32_t len)
    SendCurrentBuffer(limitedLen);
 }
 
-void Terminal::SendBinary(uint32_t* data, uint32_t len)
+void Terminal::SendBinary(const uint32_t* data, uint32_t len)
 {
    uint32_t limitedLen = len < (bufSize / sizeof(uint32_t)) ? len : bufSize / sizeof(uint32_t);
    memcpy32((int*)outBuf[curBuf], (int*)data, limitedLen);
@@ -240,16 +252,16 @@ void Terminal::FlushInput()
 void Terminal::DisableTxDMA()
 {
    txDmaEnabled = false;
-   dma_disable_channel(DMA1, hw->dmatx);
+   dma_disable_channel(hw->dmactl, hw->dmatx);
    usart_disable_tx_dma(usart);
 }
 
 void Terminal::ResetDMA()
 {
-   dma_disable_channel(DMA1, hw->dmarx);
-   dma_set_memory_address(DMA1, hw->dmarx, (uint32_t)inBuf);
-   dma_set_number_of_data(DMA1, hw->dmarx, bufSize);
-   dma_enable_channel(DMA1, hw->dmarx);
+   dma_disable_channel(hw->dmactl, hw->dmarx);
+   dma_set_memory_address(hw->dmactl, hw->dmarx, (uint32_t)inBuf);
+   dma_set_number_of_data(hw->dmactl, hw->dmarx, bufSize);
+   dma_enable_channel(hw->dmactl, hw->dmarx);
 }
 
 void Terminal::EnableUart(char* arg)
@@ -289,6 +301,19 @@ void Terminal::FastUart(char *arg)
    usart_set_stopbits(usart, USART_STOPBITS_1);
 }
 
+void Terminal::Echo(char* arg)
+{
+   arg = my_trim(arg);
+
+   if (arg[0] != 0)
+      echo = arg[0] == '0' ? false : true;
+
+   if (echo)
+      Send("Echo on\r\n");
+   else
+      Send("Echo off\r\n");
+}
+
 const TERM_CMD* Terminal::CmdLookup(char *buf)
 {
    const TERM_CMD *pCmd = termCmds;
@@ -311,19 +336,18 @@ const TERM_CMD* Terminal::CmdLookup(char *buf)
 
 void Terminal::Send(const char *str)
 {
-   for (;*str > 0; str++)
-       usart_send_blocking(usart, *str);
+   SendBinary((const uint8_t*)str, my_strlen(str));
 }
 
 void Terminal::SendCurrentBuffer(uint32_t len)
 {
-   while (!dma_get_interrupt_flag(DMA1, hw->dmatx, DMA_TCIF) && !firstSend);
+   while (!dma_get_interrupt_flag(hw->dmactl, hw->dmatx, DMA_TCIF) && !firstSend);
 
-   dma_disable_channel(DMA1, hw->dmatx);
-   dma_set_number_of_data(DMA1, hw->dmatx, len);
-   dma_set_memory_address(DMA1, hw->dmatx, (uint32_t)outBuf[curBuf]);
-   dma_clear_interrupt_flags(DMA1, hw->dmatx, DMA_TCIF);
-   dma_enable_channel(DMA1, hw->dmatx);
+   dma_disable_channel(hw->dmactl, hw->dmatx);
+   dma_set_number_of_data(hw->dmactl, hw->dmatx, len);
+   dma_set_memory_address(hw->dmactl, hw->dmatx, (uint32_t)outBuf[curBuf]);
+   dma_clear_interrupt_flags(hw->dmactl, hw->dmatx, DMA_TCIF);
+   dma_enable_channel(hw->dmactl, hw->dmatx);
 
    curBuf = !curBuf; //switch buffers
    firstSend = false; //only needed once so we don't get stuck in the while loop above
