@@ -19,6 +19,7 @@
 #ifndef LINBUS_H
 #define LINBUS_H
 
+#include <stdint.h>
 
 class LinBus
 {
@@ -35,17 +36,15 @@ class LinBus
       struct HwInfo
       {
          uint32_t usart;
+         uint32_t dma;
          uint8_t dmatx;
          uint8_t dmarx;
-         uint32_t port;
-         uint16_t pin;
       };
 
 
       static const HwInfo hwInfo[];
       static const int payloadIndex = 3;
       static const int pidIndex = 2;
-      uint32_t usart;
       const HwInfo* hw;
       uint8_t sendBuffer[11];
       uint8_t recvBuffer[12];
