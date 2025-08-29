@@ -25,7 +25,9 @@ class LinBus
 {
    public:
       /** Default constructor */
+      LinBus();
       LinBus(uint32_t usart, int baudrate);
+      void Init(uint32_t usart, int baudrate);
       void Request(uint8_t id, uint8_t* data, uint8_t len);
       bool HasReceived(uint8_t pid, uint8_t requiredLen);
       uint8_t* GetReceivedBytes() { return &recvBuffer[payloadIndex]; }
@@ -39,6 +41,9 @@ class LinBus
          uint32_t dma;
          uint8_t dmatx;
          uint8_t dmarx;
+         uint32_t port;
+         uint16_t pintx;
+         uint16_t pinrx;
       };
 
 

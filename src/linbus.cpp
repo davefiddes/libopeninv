@@ -25,28 +25,49 @@
 
 const LinBus::HwInfo LinBus::hwInfo[] =
 {
-   { USART1, DMA1, DMA_CHANNEL4, DMA_CHANNEL5 },
-   { USART2, DMA1, DMA_CHANNEL7, DMA_CHANNEL6 },
-   { USART3, DMA1, DMA_CHANNEL2, DMA_CHANNEL3 },
-   { UART4,  DMA2, DMA_CHANNEL5, DMA_CHANNEL3 },
+   { USART1, DMA1, DMA_CHANNEL4, DMA_CHANNEL5, GPIOA, GPIO_USART1_TX, GPIO_USART1_RX },
+   { USART2, DMA1, DMA_CHANNEL7, DMA_CHANNEL6, GPIOA, GPIO_USART2_TX, GPIO_USART2_RX },
+   { USART3, DMA1, DMA_CHANNEL2, DMA_CHANNEL3, GPIOB, GPIO_USART3_TX, GPIO_USART3_RX },
+   { UART4,  DMA2, DMA_CHANNEL5, DMA_CHANNEL3, GPIOC, GPIO_UART4_TX, GPIO_UART4_RX },
 };
 
+/** \brief Create a new LIN bus object but DO NOT configure hardware
+ *
+ */
+LinBus::LinBus()
+   : hw(hwInfo), sendBuffer{}, recvBuffer{}
+{
+}
 
 /** \brief Create a new LIN bus object and initialize USART and DMA
- * \pre According USART, GPIO and DMA clocks must be enabled. GPIO pins for RX
- *  and TX must be configured.
+ * \pre Associated USART, GPIO and DMA clocks must be enabled.
  * \param usart USART base address
  * \param baudrate 9600 or 19200
  *
  */
 LinBus::LinBus(uint32_t usart, int baudrate)
-   : hw(hwInfo)
+   : hw(hwInfo), sendBuffer{}, recvBuffer{}
+{
+   Init(usart, baudrate);
+}
+
+/** \brief Initialise the hardware associated with a previously created LIN bus
+ * object
+ * \pre Associated USART, GPIO and DMA clocks must be enabled.
+ * \param usart USART base address
+ * \param baudrate 9600 or 19200
+ *
+ */
+void LinBus::Init( uint32_t usart, int baudrate)
 {
    for (uint32_t i = 0; i < HWINFO_ENTRIES; i++)
    {
       if (hw->usart == usart) break;
       hw++;
    }
+
+   gpio_set_mode(hw->port, GPIO_MODE_OUTPUT_50_MHZ, GPIO_CNF_OUTPUT_ALTFN_PUSHPULL, hw->pintx);
+   gpio_set_mode(hw->port, GPIO_MODE_INPUT, GPIO_CNF_INPUT_FLOAT, hw->pinrx);
 
    usart_set_baudrate(usart, baudrate);
    usart_set_databits(usart, 8);
